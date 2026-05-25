@@ -131,3 +131,43 @@ def test_unknown_format_raises(tmp_path):
     p.write_text("")
     with pytest.raises(ValueError):
         reader.read(p, fmt="weird")
+
+
+def test_parsed_needs_clarification_event(tmp_path):
+    p = tmp_path / "x.jsonl"
+    write_jsonl(p, [
+        {
+            "type": "needs_clarification",
+            "timestamp": "T9",
+            "question": "Which DB?",
+            "context": "two options",
+            "urgency": "block",
+        },
+    ])
+    out = reader.read(p)
+    assert out.events == [{
+        "type": "needs_clarification",
+        "ts": "T9",
+        "question": "Which DB?",
+        "context": "two options",
+        "urgency": "block",
+    }]
+
+
+def test_find_latest_clarification_returns_last(tmp_path):
+    p = tmp_path / "x.jsonl"
+    write_jsonl(p, [
+        {"type": "needs_clarification", "timestamp": "T1", "question": "first?"},
+        {"type": "user", "message": {"content": "intermission"}},
+        {"type": "needs_clarification", "timestamp": "T2", "question": "second?", "urgency": "optional"},
+    ])
+    got = reader.find_latest_clarification(p)
+    assert got["question"] == "second?"
+    assert got["urgency"] == "optional"
+
+
+def test_find_latest_clarification_none(tmp_path):
+    p = tmp_path / "x.jsonl"
+    write_jsonl(p, [{"type": "user", "message": {"content": "hi"}}])
+    assert reader.find_latest_clarification(p) is None
+    assert reader.find_latest_clarification(tmp_path / "missing.jsonl") is None

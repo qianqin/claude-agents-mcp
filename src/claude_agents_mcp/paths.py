@@ -32,5 +32,14 @@ def exit_file(session_id: str) -> Path:
     return exits_dir() / session_id
 
 
+def pending_dir() -> Path:
+    return state_dir() / "pending"
+
+
+def pending_file(session_id: str) -> Path:
+    return pending_dir() / f"{session_id}.json"
+
+
 def ensure_state_dirs() -> None:
     exits_dir().mkdir(parents=True, exist_ok=True)
+    pending_dir().mkdir(parents=True, exist_ok=True)

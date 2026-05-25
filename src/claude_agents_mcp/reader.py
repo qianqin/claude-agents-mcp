@@ -122,7 +122,34 @@ def _parse_event(line: dict) -> dict | None:
             "content": line.get("content") or line.get("message"),
         }
 
+    if t == "needs_clarification":
+        return {
+            "type": "needs_clarification",
+            "ts": ts,
+            "question": line.get("question"),
+            "context": line.get("context"),
+            "urgency": line.get("urgency"),
+        }
+
     return None
+
+
+def find_latest_clarification(path: Path) -> dict | None:
+    """Scan the log file and return the latest needs_clarification event as a
+    parsed dict ({question, context, urgency, ts}), or None if not present."""
+    if not path.exists():
+        return None
+    latest: dict | None = None
+    for _, line in _iter_jsonl_from(path, 0):
+        if line.get("type") == "needs_clarification":
+            latest = {
+                "type": "needs_clarification",
+                "ts": line.get("timestamp"),
+                "question": line.get("question"),
+                "context": line.get("context"),
+                "urgency": line.get("urgency"),
+            }
+    return latest
 
 
 def read(

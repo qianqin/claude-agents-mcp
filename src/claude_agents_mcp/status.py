@@ -3,8 +3,8 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
-from . import paths, spawner
-from .registry import TERMINAL_STATUSES, AgentEntry, Registry
+from . import paths, reader, spawner
+from .registry import CLARIFY_STATUSES, TERMINAL_STATUSES, AgentEntry, Registry
 
 
 def _read_cmdline(pid: int) -> str | None:
@@ -35,9 +35,22 @@ def _read_exit_code(session_id: str) -> int | None:
 ORPHAN_GRACE_SECONDS = 0.5
 
 
+def _resolve_exit_status(entry: AgentEntry, exit_code: int) -> str:
+    """Map an exit code to a status, promoting to awaiting_clarification or
+    pending_reply when the log carries a needs_clarification event."""
+    if exit_code != 0:
+        return "errored"
+    log_path = Path(entry.log_path)
+    if reader.find_latest_clarification(log_path) is None:
+        return "done"
+    if paths.pending_file(entry.session_id).exists():
+        return "pending_reply"
+    return "awaiting_clarification"
+
+
 def refresh(entry: AgentEntry, registry: Registry, *, now_ms: int | None = None) -> AgentEntry:
     """Recompute status for one entry, persist if changed. Returns the entry."""
-    if entry.status in TERMINAL_STATUSES:
+    if entry.status in TERMINAL_STATUSES or entry.status in CLARIFY_STATUSES:
         return entry
 
     now_ms = now_ms if now_ms is not None else int(time.time() * 1000)
@@ -47,7 +60,7 @@ def refresh(entry: AgentEntry, registry: Registry, *, now_ms: int | None = None)
 
     exit_code = _read_exit_code(entry.session_id)
     if exit_code is not None:
-        new_status = "done" if exit_code == 0 else "errored"
+        new_status = _resolve_exit_status(entry, exit_code)
         return registry.update(
             entry.session_id,
             status=new_status,
@@ -65,7 +78,7 @@ def refresh(entry: AgentEntry, registry: Registry, *, now_ms: int | None = None)
         time.sleep(0.05)
         exit_code = _read_exit_code(entry.session_id)
         if exit_code is not None:
-            new_status = "done" if exit_code == 0 else "errored"
+            new_status = _resolve_exit_status(entry, exit_code)
             return registry.update(
                 entry.session_id,
                 status=new_status,

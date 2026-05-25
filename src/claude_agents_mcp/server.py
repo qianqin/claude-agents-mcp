@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import signal
 import time
@@ -10,7 +11,7 @@ from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 
 from . import paths, reader, spawner, status
-from .registry import TERMINAL_STATUSES, Registry
+from .registry import CLARIFY_STATUSES, TERMINAL_STATUSES, Registry
 from .spawner import SpawnError, SpawnRequest, spawn as spawn_impl
 
 
@@ -53,6 +54,24 @@ def spawn_agent(
     Returns: {session_id, pid, status, started_at, log_path}.
     """
     reg = _registry()
+
+    pending_path: Path | None = None
+    if session_id is not None:
+        candidate = paths.pending_file(session_id)
+        if candidate.exists():
+            try:
+                data = json.loads(candidate.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                data = None
+            if data:
+                injection = (
+                    f"Previous question: {data.get('question', '')}\n"
+                    f"Your answer: {data.get('answer', '')}\n"
+                    "Please continue."
+                )
+                prompt = injection if not prompt else f"{injection}\n\n{prompt}"
+                pending_path = candidate
+
     req = SpawnRequest(
         prompt=prompt,
         cwd=cwd or _DEFAULT_SERVER_CWD,
@@ -68,6 +87,12 @@ def spawn_agent(
         result = spawn_impl(req, reg)
     except SpawnError as e:
         raise ToolError(f"SPAWN_FAILED: {e}") from e
+
+    if pending_path is not None:
+        try:
+            pending_path.unlink()
+        except FileNotFoundError:
+            pass
 
     entry = reg.get(result.session_id)
     return _entry_dict(entry)
@@ -110,7 +135,9 @@ def get_agent_output(
     except ValueError as e:
         raise ToolError(str(e)) from e
 
-    eof = entry.status in TERMINAL_STATUSES and result.next_offset == (
+    eof = (
+        entry.status in TERMINAL_STATUSES or entry.status in CLARIFY_STATUSES
+    ) and result.next_offset == (
         log_path.stat().st_size if log_path.exists() else 0
     )
     return {
@@ -137,6 +164,8 @@ def abort_agent(session_id: str, grace_seconds: float = 2.0) -> dict[str, Any]:
     prior = entry.status
     if prior in TERMINAL_STATUSES:
         raise ToolError(f"ALREADY_FINISHED: status={prior}")
+    if prior in CLARIFY_STATUSES:
+        raise ToolError(f"AWAITING_REPLY: status={prior}; use reply_to_agent")
 
     pid = entry.pid
     try:
@@ -179,6 +208,48 @@ def abort_agent(session_id: str, grace_seconds: float = 2.0) -> dict[str, Any]:
         "prior_status": prior,
         "status": updated.status,
         "exit_code": updated.exit_code,
+    }
+
+
+@mcp.tool()
+def reply_to_agent(session_id: str, answer: str) -> dict[str, Any]:
+    """Provide a human answer to a needs_clarification question.
+
+    Writes a sidecar at ~/.claude-agents-mcp/pending/<sid>.json. The next
+    spawn_agent(session_id=...) call resumes the agent with the answer
+    injected into its prompt. Returns: {session_id, status, replied_at}.
+    """
+    reg = _registry()
+    entry = reg.get(session_id)
+    if entry is None:
+        raise ToolError(f"SESSION_NOT_FOUND: {session_id}")
+
+    entry = status.refresh(entry, reg)
+    if entry.status != "awaiting_clarification":
+        raise ToolError(
+            f"NOT_AWAITING_CLARIFICATION: status={entry.status}"
+        )
+
+    clar = reader.find_latest_clarification(Path(entry.log_path))
+    question = clar.get("question") if clar else None
+
+    paths.ensure_state_dirs()
+    pending_path = paths.pending_file(session_id)
+    replied_at = int(time.time() * 1000)
+    payload = {
+        "question": question,
+        "answer": answer,
+        "replied_at": replied_at,
+    }
+    tmp = pending_path.with_suffix(pending_path.suffix + ".tmp")
+    tmp.write_text(json.dumps(payload), encoding="utf-8")
+    os.replace(tmp, pending_path)
+
+    updated = reg.update(session_id, status="pending_reply")
+    return {
+        "session_id": session_id,
+        "status": updated.status,
+        "replied_at": replied_at,
     }
 
 

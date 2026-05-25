@@ -159,6 +159,107 @@ def test_abort_running_agent(home, monkeypatch):
     assert "ALREADY_FINISHED" in str(exc.value)
 
 
+def test_reply_to_agent_unknown_session_raises(home):
+    with pytest.raises(ToolError) as exc:
+        srv.reply_to_agent("missing-sid", "answer")
+    assert "SESSION_NOT_FOUND" in str(exc.value)
+
+
+def test_reply_to_agent_not_awaiting_raises(home, monkeypatch):
+    # Spawn an agent that exits cleanly with no clarification event.
+    wrapper = _make_wrapper(home, sleep=0, exit_code=0, jsonl_lines=[])
+    monkeypatch.setenv("CLAUDE_AGENTS_MCP_CLAUDE_BIN", str(wrapper))
+    res = srv.spawn_agent(prompt="hi", cwd=str(home))
+    sid = res["session_id"]
+    for _ in range(100):
+        listed = srv.list_agents()
+        match = [e for e in listed if e["session_id"] == sid][0]
+        if match["status"] != "running":
+            break
+        time.sleep(0.02)
+    assert match["status"] == "done"
+
+    with pytest.raises(ToolError) as exc:
+        srv.reply_to_agent(sid, "answer")
+    assert "NOT_AWAITING_CLARIFICATION" in str(exc.value)
+
+
+def test_clarification_full_flow(home, monkeypatch):
+    lines = [
+        {"type": "user", "timestamp": "T1", "message": {"role": "user", "content": "go"}},
+        {
+            "type": "needs_clarification",
+            "timestamp": "T2",
+            "question": "MySQL or Postgres?",
+            "context": "two DBs configured",
+            "urgency": "block",
+        },
+    ]
+    wrapper = _make_wrapper(home, sleep=0, exit_code=0, jsonl_lines=lines)
+    monkeypatch.setenv("CLAUDE_AGENTS_MCP_CLAUDE_BIN", str(wrapper))
+
+    res = srv.spawn_agent(prompt="pick db", cwd=str(home))
+    sid = res["session_id"]
+
+    for _ in range(100):
+        listed = srv.list_agents()
+        match = [e for e in listed if e["session_id"] == sid][0]
+        if match["status"] != "running":
+            break
+        time.sleep(0.02)
+    assert match["status"] == "awaiting_clarification"
+
+    out = srv.get_agent_output(sid)
+    assert out["status"] == "awaiting_clarification"
+    assert out["eof"] is True
+    types = [e["type"] for e in out["events"]]
+    assert "needs_clarification" in types
+
+    # Abort must be blocked while awaiting reply.
+    with pytest.raises(ToolError) as exc:
+        srv.abort_agent(sid)
+    assert "AWAITING_REPLY" in str(exc.value)
+
+    # Reply writes sidecar and flips status to pending_reply.
+    rep = srv.reply_to_agent(sid, "Postgres")
+    assert rep["status"] == "pending_reply"
+    assert rep["replied_at"] > 0
+    pending_path = paths.pending_file(sid)
+    assert pending_path.exists()
+    payload = json.loads(pending_path.read_text())
+    assert payload["question"] == "MySQL or Postgres?"
+    assert payload["answer"] == "Postgres"
+
+    # Refresh keeps pending_reply sticky.
+    listed = srv.list_agents()
+    match = [e for e in listed if e["session_id"] == sid][0]
+    assert match["status"] == "pending_reply"
+
+    # reply_to_agent again must fail (not awaiting anymore).
+    with pytest.raises(ToolError) as exc:
+        srv.reply_to_agent(sid, "again")
+    assert "NOT_AWAITING_CLARIFICATION" in str(exc.value)
+
+    # Resume spawn consumes the sidecar and starts a new run.
+    spy = {}
+    orig_spawn = srv.spawn_impl
+
+    def capture(req, registry):
+        spy["prompt"] = req.prompt
+        spy["session_id"] = req.session_id
+        return orig_spawn(req, registry)
+
+    monkeypatch.setattr(srv, "spawn_impl", capture)
+
+    res2 = srv.spawn_agent(prompt="follow-up", cwd=str(home), session_id=sid)
+    assert res2["session_id"] == sid
+    assert "Previous question: MySQL or Postgres?" in spy["prompt"]
+    assert "Your answer: Postgres" in spy["prompt"]
+    assert spy["prompt"].endswith("follow-up")
+    # Sidecar consumed.
+    assert not pending_path.exists()
+
+
 def _make_wrapper(home: Path, *, sleep: float, exit_code: int, jsonl_lines: list[dict]) -> Path:
     """Build a wrapper script that, given claude-style args, writes jsonl and exits."""
     import shlex

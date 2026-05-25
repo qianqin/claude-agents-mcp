@@ -10,6 +10,7 @@ from typing import Iterable
 from . import paths
 
 TERMINAL_STATUSES = frozenset({"done", "errored", "aborted", "orphaned"})
+CLARIFY_STATUSES = frozenset({"awaiting_clarification", "pending_reply"})
 
 DEFAULT_TTL_SECONDS = 24 * 60 * 60
 

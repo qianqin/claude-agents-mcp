@@ -13,15 +13,17 @@ Built in Python with FastMCP. Communicates over stdio.
 
 ## Scope
 
-Four tools:
+Five tools:
 
 - `spawn_agent` — start a new background agent or resume an existing session.
 - `list_agents` — list MCP-spawned agents and their status.
 - `get_agent_output` — read parsed (or raw) JSONL events from an agent's session.
 - `abort_agent` — terminate an agent via SIGTERM, escalating to SIGKILL.
+- `reply_to_agent` — supply a human answer to a `needs_clarification` event.
 
 Out of scope: TUI keystroke simulation, daemon-control-socket integration,
-multi-turn streaming input, agents dispatched outside the MCP server.
+multi-turn streaming input from a persistent interactive process, agents
+dispatched outside the MCP server.
 
 ## Approach
 
@@ -68,11 +70,19 @@ The two lifecycles are intentionally separate.
 
 Status is recomputed on every `list_agents` and `get_agent_output` call:
 
-1. `exits/<sid>` file present → read exit code. `0` → `done`, nonzero → `errored`. Terminal.
+1. `exits/<sid>` file present → read exit code.
+   - exit `0` AND log contains a `needs_clarification` event AND no
+     `pending/<sid>.json` sidecar → `awaiting_clarification`.
+   - exit `0` AND log contains a `needs_clarification` event AND sidecar
+     present → `pending_reply`.
+   - exit `0` otherwise → `done`. Terminal.
+   - nonzero → `errored`. Terminal.
 2. Registry says `aborted` → keep `aborted`. Terminal.
-3. PID alive in `/proc` AND its cmdline contains `<sid>` → `running`.
+3. Registry says `awaiting_clarification` or `pending_reply` → keep as-is
+   (these are sticky until the session is resumed or pruned).
+4. PID alive in `/proc` AND its cmdline contains `<sid>` → `running`.
    (cmdline check guards against PID reuse.)
-4. Otherwise → `orphaned` (process died without the wrapper finishing —
+5. Otherwise → `orphaned` (process died without the wrapper finishing —
    e.g. SIGKILL of the wrapper itself).
 
 ### Spawn wrapping
@@ -192,8 +202,60 @@ def abort_agent(
     grace_seconds: float = 2.0,
 ) -> dict:
     """SIGTERM → wait grace_seconds → SIGKILL.
-    Returns {session_id, prior_status, status, exit_code?}."""
+    Returns {session_id, prior_status, status, exit_code?}.
+    Blocked when status is awaiting_clarification or pending_reply —
+    callers must resolve those via reply_to_agent + spawn_agent resume."""
 ```
+
+### `reply_to_agent`
+
+```python
+def reply_to_agent(session_id: str, answer: str) -> dict:
+    """Provide a human answer to a needs_clarification event.
+
+    Writes a sidecar at ~/.claude-agents-mcp/pending/<sid>.json with
+    {question, answer, replied_at}. Status flips to pending_reply.
+    The next spawn_agent(session_id=...) call consumes the sidecar
+    and injects an answer block into the resume prompt.
+    Returns {session_id, status, replied_at}."""
+```
+
+## Bidirectional clarification
+
+Agents spawned via `claude -p` are one-shot; they cannot pause and ask
+mid-run. The clarification pattern restores question-asking without a
+long-lived interactive process:
+
+1. **Agent** detects ambiguity, writes a JSONL line into its session log
+   and exits 0:
+   ```json
+   {"type": "needs_clarification",
+    "question": "...",
+    "context": "...",
+    "urgency": "block|optional",
+    "timestamp": "..."}
+   ```
+2. **Status refresh** promotes the entry to `awaiting_clarification` once
+   the exit file is observed and the log carries the event.
+3. **Caller** reads the question via `get_agent_output` (the event is
+   surfaced in `parsed` mode) and asks the human.
+4. **Caller** calls `reply_to_agent(sid, answer)`. The server writes
+   `pending/<sid>.json` (`{question, answer, replied_at}`) atomically and
+   moves status to `pending_reply`.
+5. **Caller** resumes with `spawn_agent(prompt, session_id=sid)`. The
+   server checks for the sidecar; if present it prepends an injection
+   block to the prompt and deletes the sidecar after `Popen` succeeds:
+   ```
+   Previous question: {q}
+   Your answer: {a}
+   Please continue.
+
+   {follow-up prompt, if any}
+   ```
+
+The server is plumbing only — it does not decide what is ambiguous, and it
+does not surface the question to the human. The agent emits the event; the
+caller mediates the human interaction.
 
 ## Errors
 
@@ -201,6 +263,10 @@ Raised as `ToolError` with stable codes:
 
 - `SESSION_NOT_FOUND` — unknown session_id in registry.
 - `ALREADY_FINISHED` — abort called on a terminal-state agent.
+- `AWAITING_REPLY` — abort called while the agent is awaiting clarification
+  or has a pending reply queued.
+- `NOT_AWAITING_CLARIFICATION` — `reply_to_agent` called when status is not
+  `awaiting_clarification`.
 - `LOG_MISSING` — session file does not exist (e.g. claude failed pre-write).
 - `SPAWN_FAILED` — `claude` not on PATH or Popen raised.
 

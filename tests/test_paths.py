@@ -30,9 +30,11 @@ def test_state_paths_under_home(monkeypatch, tmp_path):
     assert paths.state_dir() == tmp_path / ".claude-agents-mcp"
     assert paths.registry_path() == tmp_path / ".claude-agents-mcp" / "registry.json"
     assert paths.exit_file("sid") == tmp_path / ".claude-agents-mcp" / "exits" / "sid"
+    assert paths.pending_file("sid") == tmp_path / ".claude-agents-mcp" / "pending" / "sid.json"
 
 
 def test_ensure_state_dirs_creates(monkeypatch, tmp_path):
     monkeypatch.setenv("HOME", str(tmp_path))
     paths.ensure_state_dirs()
     assert (tmp_path / ".claude-agents-mcp" / "exits").is_dir()
+    assert (tmp_path / ".claude-agents-mcp" / "pending").is_dir()

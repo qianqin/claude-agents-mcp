@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
@@ -87,3 +88,55 @@ def test_pid_alive_with_sid_checks_cmdline_contains_sid(home, monkeypatch, tmp_p
 def test_pid_alive_dead_pid_returns_false(home):
     # Pick a pid extremely unlikely to exist
     assert status._pid_alive_with_sid(2_147_483_640, "anything") is False
+
+
+def _write_log(home: Path, log_path: Path, lines: list[dict]) -> None:
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path.write_text("".join(json.dumps(l) + "\n" for l in lines), encoding="utf-8")
+
+
+def test_awaiting_clarification_when_exit_zero_with_event(home):
+    reg = Registry(path=paths.registry_path())
+    log_path = home / "log.jsonl"
+    e = _add(reg, log_path=str(log_path))
+    _write_log(home, log_path, [
+        {"type": "needs_clarification", "question": "which?", "urgency": "block"},
+    ])
+    paths.exit_file(e.session_id).write_text("0\n")
+    out = status.refresh(e, reg)
+    assert out.status == "awaiting_clarification"
+    assert out.exit_code == 0
+    assert out.ended_at is not None
+
+
+def test_pending_reply_when_sidecar_exists(home):
+    reg = Registry(path=paths.registry_path())
+    log_path = home / "log.jsonl"
+    e = _add(reg, log_path=str(log_path))
+    _write_log(home, log_path, [
+        {"type": "needs_clarification", "question": "which?"},
+    ])
+    paths.exit_file(e.session_id).write_text("0\n")
+    paths.pending_file(e.session_id).write_text(json.dumps({"answer": "left"}))
+    out = status.refresh(e, reg)
+    assert out.status == "pending_reply"
+
+
+def test_done_when_exit_zero_no_event(home):
+    reg = Registry(path=paths.registry_path())
+    log_path = home / "log.jsonl"
+    e = _add(reg, log_path=str(log_path))
+    _write_log(home, log_path, [{"type": "user", "message": {"content": "x"}}])
+    paths.exit_file(e.session_id).write_text("0\n")
+    out = status.refresh(e, reg)
+    assert out.status == "done"
+
+
+def test_clarify_statuses_unchanged_by_refresh(home, monkeypatch):
+    reg = Registry(path=paths.registry_path())
+    e = _add(reg, status="awaiting_clarification", ended_at=42)
+    # Even with an exit-file flip it should remain awaiting_clarification.
+    paths.exit_file(e.session_id).write_text("0\n")
+    out = status.refresh(e, reg)
+    assert out.status == "awaiting_clarification"
+    assert out.ended_at == 42
