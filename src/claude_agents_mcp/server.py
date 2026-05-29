@@ -41,14 +41,27 @@ mcp = FastMCP(
 )
 
 
+_SPAWN_NOTE = (
+    "Agent started. It has no reusable handle: the TUI auto-generates the "
+    "agent's display name a few seconds after start (derived from its work), "
+    "so the name is not knowable in advance, and no navigable session id is "
+    "exposed. To find or address this agent, call list_agents and pick it by "
+    "its (now-stable) name/description."
+)
+
+
 @mcp.tool()
 def spawn_agent(prompt: str, cwd: str | None = None) -> dict[str, Any]:
     """Spawn a new background agent by typing a prompt into the agents overview.
 
-    The TUI auto-titles the session from the conversation. `cwd` selects the
-    working directory of the tmux-hosted agents view (effective on first spawn).
-    Returns: {title, status, description, session_id}. Use `title` to address
-    the agent in other tools.
+    Confirms the agent started (a new row appears in the overview) but returns
+    NO reusable handle: the TUI auto-generates the display name a few seconds
+    after start, so the name is not knowable at spawn time, and no navigable
+    session id is exposed. `cwd` selects the working directory of the
+    tmux-hosted agents view (effective on first spawn).
+
+    Returns: {spawned, status, note}. To find/address this agent afterward,
+    call list_agents and choose it by its (now-stable) name/description.
     """
     use_default = cwd in (None, _DEFAULT_SERVER_CWD)
     controller = _ctrl() if use_default else TmuxController(cwd=cwd)
@@ -58,10 +71,9 @@ def spawn_agent(prompt: str, cwd: str | None = None) -> dict[str, Any]:
     except SpawnError as e:
         raise ToolError(f"SPAWN_FAILED: {e}") from e
     return {
-        "title": result.title,
+        "spawned": True,
         "status": result.status,
-        "description": result.description,
-        "session_id": result.session_id,
+        "note": _SPAWN_NOTE,
     }
 
 

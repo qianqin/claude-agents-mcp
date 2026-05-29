@@ -38,17 +38,40 @@ class FakeController:
         self._spawned = True
 
 
-def test_spawn_detects_new_title():
+def test_spawn_confirms_via_overview_only():
     ctrl = FakeController(["old agent"], ["old agent", "shiny new task"])
     res = spawner.spawn(
         SpawnRequest(prompt="make it", cwd="/x"),
         ctrl,
-        runner=None,
         sleep=lambda _: None,
     )
     assert ctrl.prompt == "make it"
-    assert res.title == "shiny new task"
+    # status derived from the new row's section; cwd set from the request.
     assert res.status == "running"
+    assert res.cwd == "/x"
+
+
+def test_spawn_result_has_no_handle_fields():
+    ctrl = FakeController(["old agent"], ["old agent", "shiny new task"])
+    res = spawner.spawn(
+        SpawnRequest(prompt="make it", cwd="/x"),
+        ctrl,
+        sleep=lambda _: None,
+    )
+    assert not hasattr(res, "title")
+    assert not hasattr(res, "description")
+    assert not hasattr(res, "session_id")
+
+
+def test_spawn_accepts_no_runner_argument():
+    ctrl = FakeController(["old agent"], ["old agent", "shiny new task"])
+    with pytest.raises(TypeError):
+        spawner.spawn(
+            SpawnRequest(prompt="x", cwd="/x"),
+            ctrl,
+            runner=None,
+            sleep=lambda _: None,
+        )
 
 
 def test_spawn_times_out_if_no_new_title():
@@ -63,7 +86,6 @@ def test_spawn_times_out_if_no_new_title():
         spawner.spawn(
             SpawnRequest(prompt="x", cwd="/x"),
             ctrl,
-            runner=None,
             sleep=lambda _: None,
             monotonic=mono,
         )
