@@ -50,21 +50,18 @@ def _install(monkeypatch, fake):
     return fake
 
 
-def test_spawn_agent_returns_dict(monkeypatch):
+def test_spawn_agent_returns_confirmation_only(monkeypatch):
     def fake_spawn(req, controller):
-        return SpawnResult(
-            title="shiny task",
-            status="running",
-            description="doing it",
-            session_id="sid-9",
-            cwd=req.cwd,
-        )
+        return SpawnResult(status="running", cwd=req.cwd)
 
     monkeypatch.setattr(srv, "spawn_impl", fake_spawn)
     out = srv.spawn_agent(prompt="do it")
-    assert out["title"] == "shiny task"
+    assert out["spawned"] is True
     assert out["status"] == "running"
-    assert out["session_id"] == "sid-9"
+    assert "list_agents" in out["note"]
+    assert "title" not in out
+    assert "session_id" not in out
+    assert "description" not in out
 
 
 def test_list_agents_filters(monkeypatch):

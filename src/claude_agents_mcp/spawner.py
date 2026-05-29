@@ -1,8 +1,11 @@
 """Spawn a new `claude agents` background session by driving the TUI.
 
 We type the prompt into the overview's new-session box, submit it, then watch
-the overview (the source of truth) for a new agent row to appear and return its
-title — the actionable identity used by every other tool.
+the overview (the source of truth) for a new agent row to appear. Confirming
+that row is the only signal we need: the spawn succeeded. We deliberately do
+NOT return a reusable handle — the TUI auto-generates the agent's display name
+a few seconds after start, and `claude agents --json` session ids are not
+navigable in the TUI. Callers reconnect via `list_agents` instead.
 """
 
 from __future__ import annotations
@@ -10,7 +13,7 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass
 
-from . import status, tui_state
+from . import tui_state
 from .tmux_controller import TmuxController
 
 SPAWN_POLL_TIMEOUT = 25.0
@@ -30,26 +33,14 @@ class SpawnRequest:
 
 @dataclass
 class SpawnResult:
-    title: str
     status: str
-    description: str | None
-    session_id: str | None  # best-effort from `claude agents --json`
     cwd: str
-
-
-def _best_effort_session_ids(runner) -> set[str]:
-    try:
-        kwargs = {"runner": runner} if runner is not None else {}
-        return {r["session_id"] for r in status.list_live(**kwargs) if r.get("session_id")}
-    except status.StatusError:
-        return set()
 
 
 def spawn(
     req: SpawnRequest,
     controller: TmuxController | None = None,
     *,
-    runner=None,
     sleep=time.sleep,
     monotonic=time.monotonic,
 ) -> SpawnResult:
@@ -61,8 +52,6 @@ def spawn(
         titles_before = set(tui_state.overview_titles(controller.capture()))
     except Exception as e:
         raise SpawnError(f"could not read overview before spawn: {e}") from e
-
-    sids_before = _best_effort_session_ids(runner)
 
     try:
         controller.spawn(req.prompt)
@@ -87,13 +76,7 @@ def spawn(
             f"within {SPAWN_POLL_TIMEOUT}s"
         )
 
-    new_sids = _best_effort_session_ids(runner) - sids_before
-    session_id = next(iter(new_sids)) if new_sids else None
-
     return SpawnResult(
-        title=new_row["title"],
         status=new_row.get("status", "running"),
-        description=new_row.get("description"),
-        session_id=session_id,
         cwd=req.cwd or "",
     )

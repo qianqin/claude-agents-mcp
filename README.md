@@ -79,7 +79,12 @@ Wire into a client's MCP config:
 ## Tools
 
 - `spawn_agent(prompt, cwd?)` — type a new-session prompt into the overview and
-  submit it. Returns `{title, status, description, session_id}`. `cwd` selects
+  submit it. Confirms the agent started (a new overview row appears) and returns
+  `{spawned, status, note}` — **no reusable handle**. The TUI auto-generates the
+  agent's display name a few seconds after start (derived from its work), so the
+  name is not knowable at spawn time, and no navigable session id is exposed.
+  There is no reconnect handle: to find/address the agent afterward, call
+  `list_agents` and choose it by its (now-stable) name/description. `cwd` selects
   the agents-view working directory (effective on first spawn — one tmux session
   is bound to one cwd).
 - `list_agents(status_filter?)` — parse the overview (the source of truth).
