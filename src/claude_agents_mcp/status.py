@@ -1,98 +1,107 @@
+"""Authoritative agent listing via `claude agents --json`.
+
+`claude agents --json` prints the live background sessions and exits — no TTY
+required — so it is the source of truth for which agents exist and their status.
+We enrich each record with the on-disk JSONL log path (computed from cwd +
+sessionId) so callers can read full conversation history with `reader`.
+"""
+
 from __future__ import annotations
 
-import time
-from pathlib import Path
+import json
+import os
+import subprocess
+from typing import Any
 
-from . import paths, reader, spawner
-from .registry import CLARIFY_STATUSES, TERMINAL_STATUSES, AgentEntry, Registry
+from . import paths
 
+CLAUDE_BIN_ENV = "CLAUDE_AGENTS_MCP_CLAUDE_BIN"
 
-def _read_cmdline(pid: int) -> str | None:
-    try:
-        return Path(f"/proc/{pid}/cmdline").read_bytes().decode("utf-8", "replace")
-    except (FileNotFoundError, PermissionError, ProcessLookupError):
-        return None
-
-
-def _pid_alive_with_sid(pid: int, session_id: str) -> bool:
-    cmdline = _read_cmdline(pid)
-    if cmdline is None:
-        return False
-    return session_id in cmdline
-
-
-def _read_exit_code(session_id: str) -> int | None:
-    p = paths.exit_file(session_id)
-    if not p.exists():
-        return None
-    try:
-        text = p.read_text(encoding="utf-8").strip()
-        return int(text)
-    except (ValueError, OSError):
-        return None
+# Raw `claude agents` statuses → normalized lifecycle labels.
+_STATUS_MAP = {
+    "busy": "running",
+    "working": "running",
+    "idle": "idle",
+    "awaiting_input": "awaiting_input",
+    "awaiting input": "awaiting_input",
+    "needs_input": "awaiting_input",
+    "completed": "done",
+    "done": "done",
+    "error": "errored",
+    "errored": "errored",
+}
 
 
-ORPHAN_GRACE_SECONDS = 0.5
+class StatusError(RuntimeError):
+    pass
 
 
-def _resolve_exit_status(entry: AgentEntry, exit_code: int) -> str:
-    """Map an exit code to a status, promoting to awaiting_clarification or
-    pending_reply when the log carries a needs_clarification event."""
-    if exit_code != 0:
-        return "errored"
-    log_path = Path(entry.log_path)
-    if reader.find_latest_clarification(log_path) is None:
-        return "done"
-    if paths.pending_file(entry.session_id).exists():
-        return "pending_reply"
-    return "awaiting_clarification"
+def claude_bin() -> str:
+    return os.environ.get(CLAUDE_BIN_ENV, "claude")
 
 
-def refresh(entry: AgentEntry, registry: Registry, *, now_ms: int | None = None) -> AgentEntry:
-    """Recompute status for one entry, persist if changed. Returns the entry."""
-    if entry.status in TERMINAL_STATUSES or entry.status in CLARIFY_STATUSES:
-        return entry
+def normalize_status(raw: str | None) -> str:
+    if not raw:
+        return "unknown"
+    return _STATUS_MAP.get(raw, raw)
 
-    now_ms = now_ms if now_ms is not None else int(time.time() * 1000)
 
-    # Reap any finished child so it doesn't linger as a zombie.
-    spawner.reap(entry.session_id)
+def list_live(*, runner=subprocess.run) -> list[dict[str, Any]]:
+    """Run `claude agents --json` and return enriched agent records.
 
-    exit_code = _read_exit_code(entry.session_id)
-    if exit_code is not None:
-        new_status = _resolve_exit_status(entry, exit_code)
-        return registry.update(
-            entry.session_id,
-            status=new_status,
-            exit_code=exit_code,
-            ended_at=now_ms,
-        )
-
-    if _pid_alive_with_sid(entry.pid, entry.session_id):
-        return entry
-
-    # PID gone but no exit file: race between shell child exit and the wrapper's
-    # `echo $? > exit_file` flush. Briefly retry before declaring orphaned.
-    deadline = time.time() + ORPHAN_GRACE_SECONDS
-    while time.time() < deadline:
-        time.sleep(0.05)
-        exit_code = _read_exit_code(entry.session_id)
-        if exit_code is not None:
-            new_status = _resolve_exit_status(entry, exit_code)
-            return registry.update(
-                entry.session_id,
-                status=new_status,
-                exit_code=exit_code,
-                ended_at=int(time.time() * 1000),
-            )
-
-    return registry.update(
-        entry.session_id,
-        status="orphaned",
-        ended_at=int(time.time() * 1000),
+    Each record: {sessionId, name, status (normalized), raw_status, pid, cwd,
+    kind, started_at, log_path}.
+    """
+    proc = runner(
+        [claude_bin(), "agents", "--json"],
+        capture_output=True,
+        text=True,
+        check=False,
     )
+    if proc.returncode != 0:
+        raise StatusError(
+            f"`claude agents --json` failed (rc={proc.returncode}): "
+            f"{proc.stderr.strip()}"
+        )
+    try:
+        data = json.loads(proc.stdout or "[]")
+    except json.JSONDecodeError as e:
+        raise StatusError(f"could not parse `claude agents --json`: {e}") from e
+
+    out: list[dict[str, Any]] = []
+    for item in data:
+        sid = item.get("sessionId")
+        cwd = item.get("cwd", "")
+        raw_status = item.get("status")
+        log_path = (
+            str(paths.session_log_path(cwd, sid)) if sid and cwd else None
+        )
+        out.append(
+            {
+                "session_id": sid,
+                "name": item.get("name"),
+                "status": normalize_status(raw_status),
+                "raw_status": raw_status,
+                "pid": item.get("pid"),
+                "cwd": cwd,
+                "kind": item.get("kind"),
+                "started_at": item.get("startedAt"),
+                "log_path": log_path,
+            }
+        )
+    return out
 
 
-def refresh_all(registry: Registry) -> list[AgentEntry]:
-    now_ms = int(time.time() * 1000)
-    return [refresh(e, registry, now_ms=now_ms) for e in registry.all()]
+def resolve(identifier: str, *, runner=subprocess.run) -> dict[str, Any] | None:
+    """Find a live agent by sessionId (exact) or name (exact, then prefix)."""
+    agents = list_live(runner=runner)
+    for a in agents:
+        if a["session_id"] == identifier:
+            return a
+    for a in agents:
+        if a["name"] == identifier:
+            return a
+    matches = [a for a in agents if a["name"] and a["name"].startswith(identifier)]
+    if len(matches) == 1:
+        return matches[0]
+    return None

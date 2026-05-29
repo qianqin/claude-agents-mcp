@@ -13,33 +13,9 @@ def claude_projects_dir() -> Path:
 
 
 def session_log_path(cwd: str | os.PathLike, session_id: str) -> Path:
+    """On-disk transcript path for a session, when one exists.
+
+    Note: TUI-spawned background agents do not reliably write here; this is used
+    only for best-effort enrichment of `claude agents --json` records.
+    """
     return claude_projects_dir() / cwd_slug(cwd) / f"{session_id}.jsonl"
-
-
-def state_dir() -> Path:
-    return Path.home() / ".claude-agents-mcp"
-
-
-def registry_path() -> Path:
-    return state_dir() / "registry.json"
-
-
-def exits_dir() -> Path:
-    return state_dir() / "exits"
-
-
-def exit_file(session_id: str) -> Path:
-    return exits_dir() / session_id
-
-
-def pending_dir() -> Path:
-    return state_dir() / "pending"
-
-
-def pending_file(session_id: str) -> Path:
-    return pending_dir() / f"{session_id}.json"
-
-
-def ensure_state_dirs() -> None:
-    exits_dir().mkdir(parents=True, exist_ok=True)
-    pending_dir().mkdir(parents=True, exist_ok=True)

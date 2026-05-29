@@ -1,91 +1,70 @@
 from __future__ import annotations
 
-import shlex
-
 import pytest
 
-from claude_agents_mcp import paths, spawner
-from claude_agents_mcp.registry import Registry
-from claude_agents_mcp.spawner import SpawnRequest, build_command
+from claude_agents_mcp import spawner
+from claude_agents_mcp.spawner import SpawnError, SpawnRequest
 
 
-@pytest.fixture
-def home(monkeypatch, tmp_path):
-    monkeypatch.setenv("HOME", str(tmp_path))
-    paths.ensure_state_dirs()
-    return tmp_path
+def _overview(titles):
+    rows = [
+        "0 awaiting input · 1 working · 1 completed",
+        "",
+        "Working",
+    ]
+    for t in titles:
+        rows.append(f" ✻ {t}                 some description here   3s")
+    rows += ["", "─" * 40, "❯ describe a task for a new session", "─" * 40, "? for shortcuts"]
+    return "\n".join(rows)
 
 
-def test_build_command_new_session(home):
-    req = SpawnRequest(prompt="hello world", cwd="/tmp")
-    cmd = build_command(req, sid="abc", exit_file=paths.exit_file("abc"))
-    assert cmd[0] == "sh"
-    assert cmd[1] == "-c"
-    inner = cmd[2]
-    assert "--session-id abc" in inner
-    assert "--permission-mode bypassPermissions" in inner
-    assert "'hello world'" in inner  # prompt shell-quoted
-    assert inner.endswith(f"; echo $? > {shlex.quote(str(paths.exit_file('abc')))}")
+class FakeController:
+    """Switches its overview from `before` to `after` once spawn() is called."""
+
+    def __init__(self, before_titles, after_titles):
+        self._before = _overview(before_titles)
+        self._after = _overview(after_titles)
+        self._spawned = False
+        self.prompt = None
+
+    def ensure_overview(self):
+        pass
+
+    def capture(self, ansi=False):
+        return self._after if self._spawned else self._before
+
+    def spawn(self, prompt):
+        self.prompt = prompt
+        self._spawned = True
 
 
-def test_build_command_resume(home):
-    req = SpawnRequest(prompt="next turn", cwd="/tmp", session_id="prev-sid")
-    cmd = build_command(req, sid="new-sid", exit_file=paths.exit_file("new-sid"))
-    inner = cmd[2]
-    assert "--resume prev-sid" in inner
-    assert "--session-id" not in inner
-
-
-def test_build_command_extra_flags(home):
-    req = SpawnRequest(
-        prompt="p",
-        cwd="/tmp",
-        model="opus",
-        agent="reviewer",
-        effort="high",
-        extra_args=["--add-dir", "/x"],
+def test_spawn_detects_new_title():
+    ctrl = FakeController(["old agent"], ["old agent", "shiny new task"])
+    res = spawner.spawn(
+        SpawnRequest(prompt="make it", cwd="/x"),
+        ctrl,
+        runner=None,
+        sleep=lambda _: None,
     )
-    cmd = build_command(req, sid="s", exit_file=paths.exit_file("s"))
-    inner = cmd[2]
-    for token in ["--model opus", "--agent reviewer", "--effort high", "--add-dir /x"]:
-        assert token in inner
+    assert ctrl.prompt == "make it"
+    assert res.title == "shiny new task"
+    assert res.status == "running"
 
 
-def test_spawn_uses_fake_claude_records_exit(home, monkeypatch):
-    # Use a fake "claude" that just exits 0 after writing a marker.
-    fake = home / "fake-claude.sh"
-    marker = home / "ran"
-    fake.write_text(f"#!/bin/sh\necho ran > {marker}\nexit 0\n")
-    fake.chmod(0o755)
-    monkeypatch.setenv("CLAUDE_AGENTS_MCP_CLAUDE_BIN", str(fake))
+def test_spawn_times_out_if_no_new_title():
+    ctrl = FakeController(["old agent"], ["old agent"])  # nothing new appears
+    clock = {"t": 0.0}
 
-    reg = Registry(path=paths.registry_path())
-    res = spawner.spawn(SpawnRequest(prompt="hi", cwd=str(home)), reg)
+    def mono():
+        clock["t"] += 10.0
+        return clock["t"]
 
-    # Wait briefly for subprocess
-    import time as _t
-    for _ in range(50):
-        if paths.exit_file(res.session_id).exists():
-            break
-        _t.sleep(0.02)
-
-    assert paths.exit_file(res.session_id).read_text().strip() == "0"
-    assert marker.exists()
-    entry = reg.get(res.session_id)
-    assert entry is not None
-    assert entry.pid == res.pid
-    assert entry.permission_mode == "bypassPermissions"
-
-
-def test_spawn_missing_binary_raises(home, monkeypatch):
-    monkeypatch.setenv("CLAUDE_AGENTS_MCP_CLAUDE_BIN", "/no/such/bin")
-    reg = Registry(path=paths.registry_path())
-    # sh -c will execute and exit 127; spawn itself succeeds. The exit code
-    # ends up in the exit file. Ensure spawn doesn't crash.
-    res = spawner.spawn(SpawnRequest(prompt="p", cwd=str(home)), reg)
-    import time as _t
-    for _ in range(50):
-        if paths.exit_file(res.session_id).exists():
-            break
-        _t.sleep(0.02)
-    assert paths.exit_file(res.session_id).read_text().strip() != "0"
+    with pytest.raises(SpawnError) as exc:
+        spawner.spawn(
+            SpawnRequest(prompt="x", cwd="/x"),
+            ctrl,
+            runner=None,
+            sleep=lambda _: None,
+            monotonic=mono,
+        )
+    assert "no new agent row" in str(exc.value)
