@@ -216,6 +216,28 @@ def test_parse_menu_options():
     assert by_index[2]["description"] == "Second choice."
 
 
+def test_parse_menu_options_ignores_chat_header_rule():
+    # The chat-header rule (agent name embedded in dashes) sits below the last
+    # option; it must NOT leak into that option's description, otherwise label
+    # substring matching would falsely resolve a word from the agent title.
+    menu_with_header = "\n".join(
+        [
+            "Which option you pick?",
+            "❯ 1. A",
+            "     First choice.",
+            "  2. B",
+            "     Second choice.",
+            "─" * 10 + " my agent name " + "─" * 10,
+            "Enter to select · ↑/↓ to navigate · Esc to cancel",
+        ]
+    )
+    opts = tui_state.parse_menu_options(menu_with_header)
+    last = opts[-1]
+    assert last["index"] == 2
+    assert last["description"] == "Second choice."
+    assert "my agent name" not in last["description"]
+
+
 def test_selected_option_index_from_ansi():
     assert tui_state.selected_option_index(_menu_ansi(2)) == 2
     assert tui_state.selected_option_index(_menu_ansi(1)) == 1

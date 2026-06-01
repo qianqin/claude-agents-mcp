@@ -348,12 +348,12 @@ def parse_chat(plain: str) -> dict:
 # When a background agent asks a question, its chat shows a selection MENU
 # rather than the free-text input box. The reliable signature is the footer
 # carrying both "↑/↓ to navigate" and "Enter to select". The selected option
-# row is marked by a leading `❯` glyph and purple fg SGR 38;5;105m; the in-chat
-# menu does NOT use a background SGR, so detection keys off `❯`/`38;5;105m`.
+# row is marked by a leading `❯` glyph (and purple fg SGR 38;5;105m); the
+# in-chat menu does NOT use a background SGR, so detection keys off the `❯`
+# marker, which always accompanies the highlighted row.
 
 _MENU_NAV = "↑/↓ to navigate"
 _MENU_SELECT = "Enter to select"
-_SELECTED_FG = "38;5;105"
 # A numbered option row: "N. label" (the leading `❯`/spaces are stripped first).
 _OPTION_RE = re.compile(r"^(\d+)\.\s+(.*\S)\s*$")
 
@@ -383,8 +383,10 @@ def parse_menu_options(plain: str) -> list[dict]:
             )
             continue
         # A non-option, non-empty, non-rule line right after an option is that
-        # option's description detail.
-        if options and s and not _is_rule(line) and _MENU_NAV not in s:
+        # option's description detail. _is_rule_like (not _is_rule) so the chat
+        # header rule, which embeds the agent name, is excluded — otherwise that
+        # name would leak into the last option's description and skew matching.
+        if options and s and not _is_rule_like(line) and _MENU_NAV not in s:
             prev = options[-1]
             prev["description"] = (prev["description"] + " " + s).strip()
     return options
@@ -393,7 +395,7 @@ def parse_menu_options(plain: str) -> list[dict]:
 def selected_option_index(ansi: str) -> int | None:
     """Index of the menu row marked by `❯` / fg 38;5;105m (from an `-e` capture)."""
     for line in _lines(ansi):
-        if "❯" not in line and _SELECTED_FG not in line:
+        if "❯" not in line:
             continue
         s = strip_ansi(line).strip()
         if s.startswith("❯"):
