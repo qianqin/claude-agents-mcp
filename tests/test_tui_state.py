@@ -148,3 +148,85 @@ def test_name_matches_truncated():
     assert tui_state.name_matches("exactname", "exactname")
     assert not tui_state.name_matches("alpha", "beta")
     assert not tui_state.name_matches("alpha", "")
+
+
+# --- choice menu (AskUserQuestion rendered as an arrow-key selection) --------
+
+# Plain (`-p`) capture of a choice menu, per the verified live layout.
+MENU = "\n".join(
+    [
+        "Which option you pick?",
+        "❯ 1. A",
+        "     First choice.",
+        "  2. B",
+        "     Second choice.",
+        "  3. C",
+        "     Third choice.",
+        "  4. Type something.",
+        "─" * 5,
+        "  5. Chat about this",
+        "Enter to select · ↑/↓ to navigate · Esc to cancel",
+    ]
+)
+
+
+def _menu_ansi(selected: int) -> str:
+    """Escape-coded menu capture with `❯` + fg 38;5;105m on `selected` row."""
+    rows = [
+        (1, "A"),
+        (2, "B"),
+        (3, "C"),
+        (4, "Type something."),
+        (5, "Chat about this"),
+    ]
+    lines = ["Which option you pick?"]
+    for idx, label in rows:
+        if idx == selected:
+            lines.append(
+                f"\x1b[38;5;105m❯\x1b[39m \x1b[38;5;241m{idx}.\x1b[39m "
+                f"\x1b[38;5;105m{label}\x1b[39m"
+            )
+        else:
+            lines.append(f"\x1b[38;5;241m  {idx}. {label}\x1b[39m")
+    lines.append("Enter to select · ↑/↓ to navigate · Esc to cancel")
+    return "\n".join(lines)
+
+
+def test_is_choice_menu_true():
+    assert tui_state.is_choice_menu(MENU) is True
+
+
+def test_is_choice_menu_false_for_free_text_chat():
+    assert tui_state.is_choice_menu(CHAT) is False
+    assert tui_state.is_choice_menu(OVERVIEW) is False
+
+
+def test_parse_menu_options():
+    opts = tui_state.parse_menu_options(MENU)
+    indexed = [(o["index"], o["label"]) for o in opts]
+    assert indexed == [
+        (1, "A"),
+        (2, "B"),
+        (3, "C"),
+        (4, "Type something."),
+        (5, "Chat about this"),
+    ]
+    by_index = {o["index"]: o for o in opts}
+    assert by_index[1]["description"] == "First choice."
+    assert by_index[2]["description"] == "Second choice."
+
+
+def test_selected_option_index_from_ansi():
+    assert tui_state.selected_option_index(_menu_ansi(2)) == 2
+    assert tui_state.selected_option_index(_menu_ansi(1)) == 1
+    assert tui_state.selected_option_index(_menu_ansi(4)) == 4
+
+
+def test_selected_option_index_none_when_no_marker():
+    assert tui_state.selected_option_index("no menu here") is None
+
+
+def test_is_custom_text_option():
+    assert tui_state.is_custom_text_option("Type something.") is True
+    assert tui_state.is_custom_text_option("type SOMETHING") is True
+    assert tui_state.is_custom_text_option("A") is False

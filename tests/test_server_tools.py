@@ -8,13 +8,27 @@ from claude_agents_mcp.spawner import SpawnResult
 
 
 class FakeController:
-    def __init__(self, *, send=True, open_=True, abort=True, agents=None, chat=None):
+    def __init__(
+        self,
+        *,
+        send=True,
+        open_=True,
+        abort=True,
+        agents=None,
+        chat=None,
+        is_menu=False,
+        select=True,
+        custom=True,
+    ):
         self.calls = []
         self._send = send
         self._open = open_
         self._abort = abort
         self._agents = agents or []
         self._chat = chat
+        self._is_menu = is_menu
+        self._select = select
+        self._custom = custom
 
     def list_agents(self):
         return self._agents
@@ -37,6 +51,18 @@ class FakeController:
 
     def return_to_overview(self):
         self.calls.append(("overview",))
+
+    def chat_is_menu(self, title):
+        self.calls.append(("is_menu", title))
+        return self._is_menu
+
+    def select_option(self, title, option):
+        self.calls.append(("select", title, option))
+        return self._select
+
+    def answer_custom(self, title, text):
+        self.calls.append(("custom", title, text))
+        return self._custom
 
 
 @pytest.fixture(autouse=True)
@@ -123,3 +149,40 @@ def test_abort_agent_not_found(monkeypatch):
     with pytest.raises(ToolError) as exc:
         srv.abort_agent("ghost")
     assert "ABORT_FAILED" in str(exc.value)
+
+
+def test_select_option_success(monkeypatch):
+    fake = _install(monkeypatch, FakeController(is_menu=True, select=True))
+    out = srv.select_option("target", "3")
+    assert out == {"agent": "target", "selected": True, "option": "3"}
+    assert ("select", "target", "3") in fake.calls
+
+
+def test_select_option_not_a_menu_raises(monkeypatch):
+    _install(monkeypatch, FakeController(is_menu=False))
+    with pytest.raises(ToolError) as exc:
+        srv.select_option("target", "1")
+    assert "NOT_A_MENU" in str(exc.value)
+
+
+def test_select_option_failure_raises(monkeypatch):
+    _install(monkeypatch, FakeController(is_menu=True, select=False))
+    with pytest.raises(ToolError) as exc:
+        srv.select_option("target", "9")
+    assert "SELECT_FAILED" in str(exc.value)
+
+
+def test_reply_to_menu_routes_custom_text(monkeypatch):
+    fake = _install(monkeypatch, FakeController(is_menu=True, custom=True))
+    out = srv.reply_to_agent("target", "my custom answer")
+    assert out["sent"] is True
+    assert ("custom", "target", "my custom answer") in fake.calls
+    assert not any(c[0] == "send" for c in fake.calls)
+
+
+def test_reply_to_non_menu_uses_send(monkeypatch):
+    fake = _install(monkeypatch, FakeController(is_menu=False, send=True))
+    out = srv.reply_to_agent("target", "the answer")
+    assert out["sent"] is True
+    assert ("send", "target", "the answer") in fake.calls
+    assert not any(c[0] == "custom" for c in fake.calls)

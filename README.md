@@ -95,8 +95,18 @@ Wire into a client's MCP config:
   viewport into `{title, agent, events:[{type, text}]}` where `type` is
   `user|assistant|recap`. Only the on-screen portion is captured (the TUI is a
   full-screen app), so this is the most recent conversation, not full history.
-- `send_to_agent(agent, message)` — open the chat, type the message, submit.
-- `reply_to_agent(agent, answer)` — same mechanism, for agents awaiting input.
+- `send_to_agent(agent, message)` — open the chat, type the raw message into the
+  input box, submit. (Always free text; never touches a choice menu.)
+- `select_option(agent, option)` — answer an agent's **choice-menu** question
+  (AskUserQuestion renders as an arrow-key menu in the chat). `option` is the
+  option number (`"2"`) or a case-insensitive substring of an option's
+  label/description (`"Second"`). Navigates the highlight to the option (arrow
+  keys, verifying after each press) and confirms. Raises `NOT_A_MENU` if the
+  chat isn't a menu, `SELECT_FAILED` if it can't navigate/verify.
+- `reply_to_agent(agent, answer)` — reply to an agent awaiting input.
+  **Menu-aware**: if the chat is a choice menu, routes `answer` through the
+  menu's free-text "Type something" option; otherwise types it into the normal
+  input box (the `send_to_agent` path).
 - `open_agent(agent)` / `return_to_overview()` — explicit navigation.
 - `abort_agent(agent)` — select + `Ctrl+X` + confirm `Ctrl+X`. Deleting from the
   agents view kills the agent process.

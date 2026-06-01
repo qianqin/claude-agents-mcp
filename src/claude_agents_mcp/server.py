@@ -33,10 +33,15 @@ mcp = FastMCP(
         "reliable identity: `claude agents --json` session names are sid "
         "prefixes that do NOT match the titles and may list stale/ghost "
         "sessions, so list_sessions is supplementary only.\n\n"
+        "Some agent questions render as an arrow-key choice menu in the chat "
+        "(not a free-text box). Use select_option to pick an option (by number "
+        "or label substring); reply_to_agent is menu-aware and routes free text "
+        "through the menu's \"Type something\" escape hatch automatically.\n\n"
         "Tools: spawn_agent (start), list_agents (enumerate from the overview), "
-        "get_agent_output (read the chat transcript), send_to_agent / "
-        "reply_to_agent (message an agent), abort_agent (delete + kill), "
-        "open_agent / return_to_overview (navigate), get_tui_state (debug)."
+        "get_agent_output (read the chat transcript), send_to_agent (raw text to "
+        "the input box) / reply_to_agent (menu-aware reply) / select_option "
+        "(answer a choice menu), abort_agent (delete + kill), open_agent / "
+        "return_to_overview (navigate), get_tui_state (debug)."
     ),
 )
 
@@ -143,11 +148,48 @@ def send_to_agent(agent: str, message: str) -> dict[str, Any]:
 
 
 @mcp.tool()
+def select_option(agent: str, option: str) -> dict[str, Any]:
+    """Answer an agent's choice-menu question by picking an option.
+
+    When a background agent asks a question (AskUserQuestion), its chat renders
+    an arrow-key selection menu. `option` may be the option number ("2") or a
+    case-insensitive substring of an option's label/description ("Second"). The
+    controller navigates the highlight to the option, verifies, and confirms.
+    Returns: {agent, selected, option}. Raises NOT_A_MENU if the agent isn't
+    showing a choice menu, or SELECT_FAILED if navigation/verification failed.
+    """
+    ctrl = _ctrl()
+    try:
+        if not ctrl.chat_is_menu(agent):
+            raise ToolError(f"NOT_A_MENU: {agent!r} is not showing a choice menu")
+        ok = ctrl.select_option(agent, option)
+    except TmuxError as e:
+        raise ToolError(f"SELECT_FAILED: {e}") from e
+    if not ok:
+        raise ToolError(f"SELECT_FAILED: could not select {option!r} for {agent!r}")
+    return {"agent": agent, "selected": True, "option": option}
+
+
+@mcp.tool()
 def reply_to_agent(agent: str, answer: str) -> dict[str, Any]:
     """Reply to an agent awaiting input (a clarification question).
 
-    Same mechanism as send_to_agent. Returns: {agent, sent}.
+    Menu-aware: if the agent's chat is currently a choice menu, `answer` is
+    routed through the free-text "Type something" option (select it, then type
+    the text). Otherwise the answer is typed into the normal chat input box
+    (same mechanism as send_to_agent). Returns: {agent, sent}.
     """
+    ctrl = _ctrl()
+    try:
+        if ctrl.chat_is_menu(agent):
+            ok = ctrl.answer_custom(agent, answer)
+            if not ok:
+                raise ToolError(
+                    f"SEND_FAILED: could not answer menu for {agent!r}"
+                )
+            return {"agent": agent, "sent": True}
+    except TmuxError as e:
+        raise ToolError(f"SEND_FAILED: {e}") from e
     return send_to_agent(agent, answer)
 
 
