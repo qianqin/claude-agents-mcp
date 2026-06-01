@@ -343,6 +343,74 @@ def parse_chat(plain: str) -> dict:
     return {"agent": chat_agent_name(plain), "events": events}
 
 
+# --- choice menu (AskUserQuestion rendered as an arrow-key selection) --------
+#
+# When a background agent asks a question, its chat shows a selection MENU
+# rather than the free-text input box. The reliable signature is the footer
+# carrying both "↑/↓ to navigate" and "Enter to select". The selected option
+# row is marked by a leading `❯` glyph (and purple fg SGR 38;5;105m); the
+# in-chat menu does NOT use a background SGR, so detection keys off the `❯`
+# marker, which always accompanies the highlighted row.
+
+_MENU_NAV = "↑/↓ to navigate"
+_MENU_SELECT = "Enter to select"
+# A numbered option row: "N. label" (the leading `❯`/spaces are stripped first).
+_OPTION_RE = re.compile(r"^(\d+)\.\s+(.*\S)\s*$")
+
+
+def is_choice_menu(plain: str) -> bool:
+    """True when the chat is a selection menu (per the footer signature)."""
+    return _MENU_NAV in plain and _MENU_SELECT in plain
+
+
+def parse_menu_options(plain: str) -> list[dict]:
+    """Ordered options for a choice menu.
+
+    Each: `{index, label, description}`. `label` is the option-row text (e.g.
+    "A", "Type something."); `description` is the indented detail line(s) below
+    it (e.g. "First choice."), joined with spaces — useful for label-substring
+    matching. `description` is "" when the option has none.
+    """
+    options: list[dict] = []
+    for line in _lines(plain):
+        s = strip_ansi(line).strip()
+        if s.startswith("❯"):
+            s = s[1:].lstrip()
+        m = _OPTION_RE.match(s)
+        if m:
+            options.append(
+                {"index": int(m.group(1)), "label": m.group(2), "description": ""}
+            )
+            continue
+        # A non-option, non-empty, non-rule line right after an option is that
+        # option's description detail. _is_rule_like (not _is_rule) so the chat
+        # header rule, which embeds the agent name, is excluded — otherwise that
+        # name would leak into the last option's description and skew matching.
+        if options and s and not _is_rule_like(line) and _MENU_NAV not in s:
+            prev = options[-1]
+            prev["description"] = (prev["description"] + " " + s).strip()
+    return options
+
+
+def selected_option_index(ansi: str) -> int | None:
+    """Index of the menu row marked by `❯` / fg 38;5;105m (from an `-e` capture)."""
+    for line in _lines(ansi):
+        if "❯" not in line:
+            continue
+        s = strip_ansi(line).strip()
+        if s.startswith("❯"):
+            s = s[1:].lstrip()
+        m = _OPTION_RE.match(s)
+        if m:
+            return int(m.group(1))
+    return None
+
+
+def is_custom_text_option(label: str) -> bool:
+    """True for the auto-appended free-text escape hatch ("Type something")."""
+    return label.strip().lower().startswith("type something")
+
+
 def name_matches(target: str, visible: str) -> bool:
     """True if a (possibly truncated, ellipsis-suffixed) visible overview name
     refers to the target agent name from `claude agents --json`."""

@@ -142,3 +142,113 @@ def test_list_agents_parses_overview():
     titles = {row["title"] for row in rows}
     assert "my agent" in titles
     assert "other agent" in titles
+
+
+# --- choice-menu selection ---------------------------------------------------
+
+_MENU_FOOTER = "Enter to select · ↑/↓ to navigate · Esc to cancel"
+_MENU_HEADER = "─" * 10 + " my agent " + "─" * 10
+
+
+def _menu_plain():
+    return "\n".join(
+        [
+            "Which option you pick?",
+            "❯ 1. A",
+            "     First choice.",
+            "  2. B",
+            "     Second choice.",
+            "  3. C",
+            "     Third choice.",
+            "  4. Type something.",
+            "  5. Chat about this",
+            _MENU_HEADER,
+            _MENU_FOOTER,
+        ]
+    )
+
+
+def _menu_ansi(selected):
+    rows = [(1, "A"), (2, "B"), (3, "C"), (4, "Type something."), (5, "Chat about this")]
+    lines = ["Which option you pick?"]
+    for idx, label in rows:
+        if idx == selected:
+            lines.append(
+                f"\x1b[38;5;105m❯\x1b[39m \x1b[38;5;241m{idx}.\x1b[39m "
+                f"\x1b[38;5;105m{label}\x1b[39m"
+            )
+        else:
+            lines.append(f"\x1b[38;5;241m  {idx}. {label}\x1b[39m")
+    lines.append(_MENU_HEADER)
+    lines.append(_MENU_FOOTER)
+    return "\n".join(lines)
+
+
+# A chat capture AFTER the menu has been answered (menu footer gone).
+_ANSWERED = "\n".join(
+    [
+        "● User answered Claude's questions: Which option you pick? → C",
+        _MENU_HEADER,
+        "❯ ",
+        "─" * 40,
+        "← for agents",
+    ]
+)
+
+
+def _open_chat_prefix():
+    """open_agent path: chat already shown so it short-circuits on header."""
+    return CHAT
+
+
+def test_select_option_by_number_navigates_down_and_enters():
+    # open_agent sees CHAT header (short-circuit). Then the menu captures:
+    # plain (is_menu check), ansi (selected=1), after Down*2 ansi shows 3,
+    # Enter then plain shows answered.
+    plain = [
+        CHAT.replace("my agent", "my agent"),  # open_agent verify
+        _menu_plain(),  # is_choice_menu check
+        _ANSWERED,  # post-Enter verify
+    ]
+    ansi = [_menu_ansi(1), _menu_ansi(2), _menu_ansi(3)]
+    r = FakeRunner(plain=plain, ansi=ansi)
+    c = TmuxController(runner=r, sleep=_noop_sleep)
+    assert c.select_option("my agent", "3") is True
+    keys = [k[-1] for k in r.sent_keys()]
+    assert keys.count("Down") == 2
+    assert "Enter" in keys
+    assert "Up" not in keys
+
+
+def test_select_option_by_label_substring():
+    plain = [CHAT, _menu_plain(), _ANSWERED]
+    # Marker moves one step per Down: read 1, Down -> read 2 (target).
+    ansi = [_menu_ansi(1), _menu_ansi(2), _menu_ansi(2)]
+    r = FakeRunner(plain=plain, ansi=ansi)
+    c = TmuxController(runner=r, sleep=_noop_sleep)
+    assert c.select_option("my agent", "Second") is True
+    keys = [k[-1] for k in r.sent_keys()]
+    assert keys.count("Down") == 1
+    assert "Enter" in keys
+
+
+def test_select_option_not_a_menu_returns_false():
+    r = FakeRunner(plain=[CHAT, CHAT])
+    c = TmuxController(runner=r, sleep=_noop_sleep)
+    assert c.select_option("my agent", "1") is False
+
+
+def test_answer_custom_selects_type_something_then_types():
+    plain = [CHAT, _menu_plain(), _ANSWERED]
+    # Marker moves one step per Down: 1 -> 2 -> 3 -> 4 (the "Type something" row).
+    ansi = [_menu_ansi(1), _menu_ansi(2), _menu_ansi(3), _menu_ansi(4), _menu_ansi(4)]
+    r = FakeRunner(plain=plain, ansi=ansi)
+    c = TmuxController(runner=r, sleep=_noop_sleep)
+    assert c.answer_custom("my agent", "my custom answer") is True
+    keys = [k[-1] for k in r.sent_keys()]
+    # Navigated from 1 to 4 via 3 Downs, Enter to pick "Type something",
+    # then the text is pasted and submitted with Enter.
+    assert keys.count("Down") == 3
+    set_buffer = [c2 for c2 in r.calls if len(c2) > 1 and c2[1] == "set-buffer"]
+    assert set_buffer and set_buffer[-1][-1] == "my custom answer"
+    assert keys.count("Enter") >= 2

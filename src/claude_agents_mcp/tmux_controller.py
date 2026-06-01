@@ -255,6 +255,85 @@ class TmuxController:
         self.send_key("Enter")
         return True
 
+    def chat_is_menu(self, name: str) -> bool:
+        """Open the agent and report whether its chat is a choice menu."""
+        if not self.open_agent(name):
+            return False
+        return tui_state.is_choice_menu(self.capture())
+
+    def _resolve_option_index(self, plain: str, option: str) -> int | None:
+        """Map `option` (a number or case-insensitive label substring) to a
+        menu option index, or None if it matches no option."""
+        options = tui_state.parse_menu_options(plain)
+        if option.isdigit():
+            idx = int(option)
+            return idx if any(o["index"] == idx for o in options) else None
+        needle = option.strip().lower()
+        for o in options:
+            haystack = (o["label"] + " " + o.get("description", "")).lower()
+            if needle in haystack:
+                return o["index"]
+        return None
+
+    def _navigate_to_option(self, target: int) -> bool:
+        """Move the `❯` marker onto option `target`, verifying after each key."""
+        for _ in range(MAX_NAV_STEPS):
+            current = tui_state.selected_option_index(self.capture(ansi=True))
+            if current is None:
+                return False
+            if current == target:
+                return True
+            self.send_key("Down" if target > current else "Up")
+        return False
+
+    def select_option(self, name: str, option: str) -> bool:
+        """Answer a choice menu by selecting `option` (number or label substring).
+
+        Opens the agent, confirms a menu is showing (else False), navigates the
+        `❯` marker to the target via arrow keys (verifying after each press),
+        presses Enter, and confirms the menu is gone. Returns True on success.
+        """
+        if not self.open_agent(name):
+            return False
+        plain = self.capture()
+        if not tui_state.is_choice_menu(plain):
+            return False
+        target = self._resolve_option_index(plain, option)
+        if target is None:
+            return False
+        if not self._navigate_to_option(target):
+            return False
+        self.send_key("Enter")
+        return not tui_state.is_choice_menu(self.capture())
+
+    def answer_custom(self, name: str, text: str) -> bool:
+        """Answer a choice menu with free text via the "Type something" option.
+
+        Selects the custom-text option, presses Enter, types `text`, and submits.
+        Returns True if the menu was present and the text was sent.
+        """
+        if not self.open_agent(name):
+            return False
+        plain = self.capture()
+        if not tui_state.is_choice_menu(plain):
+            return False
+        target = next(
+            (
+                o["index"]
+                for o in tui_state.parse_menu_options(plain)
+                if tui_state.is_custom_text_option(o["label"])
+            ),
+            None,
+        )
+        if target is None:
+            return False
+        if not self._navigate_to_option(target):
+            return False
+        self.send_key("Enter")
+        self.send_text(text)
+        self.send_key("Enter")
+        return True
+
     def abort_agent(self, name: str) -> bool:
         """Select the agent in the overview and delete it. Ctrl+X arms the
         delete; a second Ctrl+X within the confirm window commits it (footer
